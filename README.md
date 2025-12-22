@@ -9,7 +9,7 @@ ModuleNotFoundError: No module named 'torch.nn.attention.flex_attention'
 ```
 To avoid this, install the friendly fork: 
 ```
-pip install "git+https://github.com/yukara-ikemiya/friendly-stable-audio-tools.git@main"
+pip install "git+https://github.com/Stability-AI/stable-audio-tools.git@84315cc06f91caad218a0209445a0470f277cc17"
 ```
 
 ### get jsonl

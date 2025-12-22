@@ -1,25 +1,23 @@
-import math
-import torchdiffeq
-from torch.utils.data._utils.collate import default_collate
 from pathlib import Path
-import matplotlib.pyplot as plt
-import soundfile
-from audio_flow.utils import CombinedModel, parse_yaml, logmel
+import re
 
 import torch
-
-from train import get_adaptor,get_base,get_data_transform,get_dataset
-import typing as tp
-
-import argparse
-
 import torchaudio
-import numpy as np
+import torchdiffeq
+import yaml
+from audio_flow.utils import CombinedModel
+from train import get_adaptor, get_base, get_data_transform, get_dataset
 
-from audio_flow.data_transforms.transt2music import Trans2MusicVAE
+CONFIG_PATH = "configs/transcript2muic_30s.yaml"
 
-OUTPUT_FOLDER = "exp_infer"
-@torch.no_grad()
+# CKPT_PATH = hf_hub_download(
+#     repo_id="shwj/symphony-rendering",
+#     filename="model_traced_slakh.pt",
+# )
+CKPT_PATH = "/lan/ifc/downloaded_datasets/ljh_tmp/step=150000_ema.pt"
+
+DEVICE = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+
 def _load_model_for_infer(configs: dict, ckpt_path: str, device: str) -> CombinedModel:
     """Build model exactly as in training and load EMA weights."""
     base = get_base(configs).to(device)
@@ -37,188 +35,145 @@ def _load_model_for_infer(configs: dict, ckpt_path: str, device: str) -> Combine
     model.eval()
     return model
 
-import re
-def _sanitize_filename(s: str) -> str:
-    # keep CJK and letters/numbers; replace forbidden chars with '_'
-    return re.sub(r'[\\/:*?"<>|\n\r\t]+', '_', s).strip()
+with open(CONFIG_PATH, "r") as fr:
+    model_config = yaml.load(fr, Loader=yaml.FullLoader)
+model = _load_model_for_infer(model_config, CKPT_PATH, DEVICE)
+print(f"total params = {sum(p.numel() for p in model.parameters())/1024/1024} M")
 
 
-@torch.no_grad()
-def infer_once(
-    config_path: str,
-    ckpt_path: str | None,
-    split: tp.Literal["train", "test"] = "test",
-    idx: int = -1,
-    num: int = 1,
-    out_dir: str = "./results/infer",
-    seed: int = 0,
-    ode_method: str = "dopri5",
-    rtol: float = 1e-4,
-    atol: float = 1e-4,
-    override_caption: str | None = None,
-    override_label_id: int | None = None,
-):
-    """
-    Generate audio with a trained checkpoint.
-    If idx >= 0, generate for that single item from the dataset.
-    Otherwise, take `num` evenly-spaced items from the split.
-    """
-    configs = parse_yaml(config_path)
-    # device = configs["train"]["device"]
-
-    device = "cuda"
-
-    # Build data side
-    data_transform:Trans2MusicVAE = get_data_transform(configs).to(device)
-    dataset = get_dataset(configs, split=split, mode="test")
+from audio_flow.data_transforms.transt2music import Trans2MusicVAE
+data_transform:Trans2MusicVAE = get_data_transform(model_config).to(DEVICE)
+print(f"total params = {sum(p.numel() for p in model.parameters())/1024/1024} M")
 
 
+AUDIO_PATH  = "Bach-Minuet-in-G-major-BWV-Anh-114-Piano_360p.wav"  # condition
+OUTPUT_ROOT = "exp_infer_notebook"                # output directory prefix
 
-    # Build & load model
-    model = _load_model_for_infer(configs, ckpt_path, device)
+LABEL_TO_INDEX = {
+    "Johannes Brahms": 0,
+    "Johann Sebastian Bach": 1,
+    "Antonín Dvořák": 2,
+    "Sergei Rachmaninoff": 3,
+    "Sergei Prokofiev": 4,
+    "Pyotr Ilyich Tchaikovsky": 5,
+    "Joseph Haydn": 6,
+    "Dmitri Shostakovich": 7,
+    "Franz Schubert": 8,
+    "Wolfgang Amadeus Mozart": 9,
+    "Ludwig van Beethoven": 10,
+    "Gustav Mahler": 11,
+}
 
-    # Output directory
-    config_name = Path(config_path).stem
-    ckpt_name = Path(ckpt_path).stem if ckpt_path else "resume"
-    out_dir = Path(out_dir, config_name, ckpt_name, split)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Deterministic noise per item if desired
-    g = torch.Generator(device=device).manual_seed(seed)
-    
-
-
-    AUDIO_PATH = "20250927-121041.wav"
- 
-    wav, sr = torchaudio.load(AUDIO_PATH)  # [C, L], float32 in [-1, 1] typically
-    target_sr = 48000
-    if sr != target_sr:
-        resampler = torchaudio.transforms.Resample(sr, target_sr)
-        wav = resampler(wav)
-        sr = target_sr
-
-    # Crop/pad to model’s clip length
-    clip_seconds = float(configs["clip_duration"])
-    target_len = int(sr * clip_seconds)
-    start_frame = 48000 * 45
-
-    print(f"wav.shape = {wav.shape}")
-
-    if wav.size(1) >= target_len:
-        if clip_seconds == 30.0:
-            wav = wav[:, :target_len]
-            wav = wav[:, start_frame: start_frame + target_len]
+LABELS = [
+    "Franz Schubert",
+    "Wolfgang Amadeus Mozart",
+    "Johann Sebastian Bach",
+    "Sergei Rachmaninoff",
+    "Ludwig van Beethoven",
+]
 
 
-        if clip_seconds == 10.0:
-            start_frame = 48000 * 20
-            wav = wav[:,start_frame :start_frame + target_len]
-
-    else:
-        wav = torch.nn.functional.pad(wav, (0, target_len - wav.size(1)))
-
-    print(f"wav.shape = {wav.shape}")
-    # labels = ['舒伯特（Franz Schubert）', '莫扎特（Wolfgang Amadeus Mozart）', '巴赫（Johann Sebastian Bach）', '拉赫玛尼诺夫（Sergei Rachmaninoff）', '巴赫（Johann Sebastian Bach）', '马勒（Gustav Mahler）', '马勒（Gustav Mahler）', '德沃夏克（Antonín Dvořák）']
-
-    labels = ['舒伯特（Franz Schubert）', '莫扎特（Wolfgang Amadeus Mozart）', '巴赫（Johann Sebastian Bach）', '拉赫玛尼诺夫（Sergei Rachmaninoff）',"贝多芬（Ludwig van Beethoven）"]
+wav, sr = torchaudio.load(AUDIO_PATH)  # [C, L], float32 in [-1, 1] typically
+target_sr = 48000
+if sr != target_sr:
+    resampler = torchaudio.transforms.Resample(sr, target_sr)
+    wav = resampler(wav)
+    sr = target_sr
 
 
-    B = len(labels)
-    batched_wav = wav.unsqueeze(0).repeat(B, 1, 1)  # [B, 2, L]
 
-    # Build a "data" dict that matches your pipeline (like a collated batch)
-    all_idx = []
-    for label in labels:
-        idx = dataset.lb_to_ix[label]
-        all_idx.append(idx) 
-    all_idx = torch.LongTensor(all_idx)
-    data = {"wav": batched_wav, "label": labels,"latent":torch.rand(B,64,int(clip_seconds*25)),"target":all_idx}
+# Crop/pad to model’s clip length
+clip_seconds = float(model_config["clip_duration"])
+target_len = int(sr * clip_seconds)
+start_frame = 0
+start_frame = wav.shape[1]//2 - target_len//2 
 
+print(f"wav.shape = {wav.shape} start_frame = {start_frame} target_len = {target_len}")
+
+if wav.size(1) >= target_len:
+    if clip_seconds == 30.0:
+        # wav = wav[:, :target_len]
+        wav = wav[:, start_frame: start_frame + target_len]
+
+
+B = len(LABELS)
+batched_wav_16k = wav.unsqueeze(0).repeat(B, 1, 1)  # [B, 2, L]
+all_idx = []
+for label in LABELS:
+    idx = LABEL_TO_INDEX[label]
+    all_idx.append(idx) 
+all_idx = torch.LongTensor(all_idx)
+data = {"wav": batched_wav_16k, "label": LABELS,"latent":torch.rand(B,64,int(clip_seconds*25)),"target":all_idx}
+
+with torch.no_grad():
     x_real, cond_dict = data_transform(data)  # x_real: [B, D, T], cond_dict contains ids/emb info
     # ---------- Flow ODE (noise -> sample) ----------
-    g = torch.Generator(device=device).manual_seed(seed)
-    noise = torch.randn_like(x_real).to(device)
+    g = torch.Generator(device=DEVICE).manual_seed(42)
+    noise = torch.randn_like(x_real).to(DEVICE)
     emb = model.adaptor(cond_dict)
-    
     traj = torchdiffeq.odeint(
         func=lambda t, x: model.base(t, x, emb),
         y0=noise,
-        t=torch.linspace(0, 1, 2, device=device),
-        method=ode_method,
-        rtol=rtol,
-        atol=atol,
+        t=torch.linspace(0, 1, 2, device=DEVICE),
+        method="dopri5",
+        rtol=1e-4,
+        atol=1e-4,
     )
     x_gen = traj[-1]  # [B, D, T]
-
-    # ---------- Decode & save per-label ----------
-    # Use the transform’s output sample rate (usually matches training SR)
-    sr_out = getattr(data_transform, "sr", sr)
-
     gen_audio = data_transform.latent_to_audio(x_gen).data.cpu()  # [B, C, L]
     # (Optional) GT decode if you want it:
-    gt_audio = data_transform.latent_to_audio(x_real).data.cpu()  # [B, C, L]
+    gt_latent = data_transform.vae.encode(batched_wav_16k.to(DEVICE))
+    gt_audio = data_transform.latent_to_audio(gt_latent).data.cpu()  # [B, C, L]
     stem = Path(AUDIO_PATH).stem
 
+import torchaudio
+torchaudio.save(f"tmp.wav", gt_audio[0], sr)
 
-    out_root = f"{OUTPUT_FOLDER}_{_sanitize_filename(stem)}_gen"
-    out_dir = Path(out_root) / Path(config_path).stem / Path(ckpt_path).stem
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for i, label in enumerate(labels):
-        # fname = f"{_sanitize_filename(label)}_{_sanitize_filename(stem)}_gen.wav"
-        fname = f"{_sanitize_filename(label)}.wav"
-
-
-        path = out_dir / fname
-        # wav_np = gen_audio[i].T.astype(np.float32)  # [L, C]
-        # sf.write(file=str(path), data=wav_np, samplerate=sr_out)
+del data_transform, model
+import gc
+gc.collect()
+torch.cuda.empty_cache()
 
 
-        torchaudio.save(str(path),gen_audio[i],sample_rate =  48000)
-        print(f"[✓] Wrote {path}")
+from train_classification import AudioClassifier
+MODEL_PATH = "/home/jiahelei/github/audio_flow/checkpoints/train_classification/transcript2muic_10s/step=40000_ema.pt"
+print(f"Loading model checkpoint from: {MODEL_PATH}")
+DEVICE = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 
-    # path = out_dir / "recon.wav"
-    # torchaudio.save(str(path),gt_audio[0], sample_rate = 48000)
+classification_model = AudioClassifier(num_classes=12).to(DEVICE)
+classification_model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+classification_model.eval()
+print("Model loaded successfully.")
+
+print(f"total params of AudioClassifier = {sum(p.numel() for p in classification_model.parameters())/1024/1024} M")
 
 
-    path = out_dir / "real.wav"
-    torchaudio.save(str(path),wav, sample_rate = 48000)
 
+# batched_wav_16k = batched_wav_16k.to(DEVICE)
 
-if __name__ == "__main__":
+resampler_48k_to_16k = torchaudio.transforms.Resample(48000, 16000).to(DEVICE)
+batched_wav_16k = resampler_48k_to_16k(gen_audio.to(DEVICE))
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True, help="Path of config yaml.")
-    parser.add_argument("--no_log", action="store_true", default=False)
+b,c, l = batched_wav_16k.shape
+seg_len = 16000 * 30
 
-    # ---------- NEW: inference flags ----------
-    parser.add_argument("--infer", action="store_true", help="Run inference instead of training.")
-    parser.add_argument("--ckpt", type=str, default=None, help="Path to EMA .pt checkpoint. If omitted, uses train.resume_ckpt_path in YAML.")
-    parser.add_argument("--split", type=str, default="test", choices=["train", "test"])
-    parser.add_argument("--idx", type=int, default=-1, help="Single index from the dataset to condition on; -1 = auto pick evenly-spaced items.")
-    parser.add_argument("--num", type=int, default=1, help="How many items to generate if --idx = -1.")
-    parser.add_argument("--out_dir", type=str, default="./results/infer")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--ode_method", type=str, default="dopri5", choices=["dopri5", "rk4", "euler", "midpoint"])
-    parser.add_argument("--rtol", type=float, default=1e-4)
-    parser.add_argument("--atol", type=float, default=1e-4)
-    parser.add_argument("--caption", type=str, default=None, help="Optional: override caption in cond_dict if your transform supports it.")
-    parser.add_argument("--label_id", type=int, default=None, help="Optional: override label id in cond_dict if your transform supports it.")
-    # ------------------------------------------
+if l < seg_len:
+    pad = torch.zeros((b, c, seg_len), dtype=batched_wav_16k.dtype, device=batched_wav_16k.device)
+    pad[:, :, :l] = batched_wav_16k
+    chunk_16k = pad
+else:
+    start = (l - seg_len) // 2
+    chunk_16k = batched_wav_16k[:, :, start:start + seg_len]
 
-    args = parser.parse_args()
+cnt_correct = 0
+with torch.no_grad():
+    for idx in range(chunk_16k.shape[0]):
+        true_target = all_idx[idx].item()
+        chunk_16k_single = chunk_16k[idx:idx+1, :, :]
 
-    infer_once(
-        config_path=args.config,
-        ckpt_path=args.ckpt,
-        split=args.split,
-        idx=args.idx,
-        num=args.num,
-        out_dir=args.out_dir,
-        seed=args.seed,
-        ode_method=args.ode_method,
-        rtol=args.rtol,
-        atol=args.atol,
-        override_caption=args.caption,
-        override_label_id=args.label_id,
-    )
+        logits = classification_model(chunk_16k_single)
+        prediction = torch.argmax(logits, dim=1).item()
+
+        if prediction == true_target:
+            cnt_correct += 1
+print(f"Accuracy: {cnt_correct}/{B} = {cnt_correct/B}")

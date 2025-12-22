@@ -12,8 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torchdiffeq
 import wandb
-from audio_flow.utils import (CombinedModel, LinearWarmUp, parse_yaml,
-                              requires_grad, update_ema, logmel)
+from audio_flow.utils import CombinedModel, LinearWarmUp, parse_yaml,requires_grad, update_ema, logmel
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data._utils.collate import default_collate
 from torchcfm.conditional_flow_matching import ConditionalFlowMatcher

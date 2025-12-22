@@ -28,7 +28,7 @@ base:
 adaptor:
     name: OnehotTransEncoder
     num_classes: 12
-    in_channels: 128
+    in_channels: 512 # 4 * 128 transcript latent
     dim: 64
 
 train:

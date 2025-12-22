@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torchaudio
-from audidata.datasets import GTZAN
 from torch import Tensor
 from einops import rearrange
 
@@ -80,8 +79,9 @@ class Trans2MusicVAE(nn.Module):
                     # import pdb;pdb.set_trace()
                     output_dict = self.trans_model(chunk)
 
-                    frame_roll_chunks.append(output_dict["frame_roll"])
-                
+                    # frame_roll_chunks.append(output_dict["frame_roll"])
+                    frame_roll_chunks.append(output_dict["frame_roll"][:,:-1,:])  # Remove last frame to match original length
+
                 # Concatenate the results from all chunks along the time dimension (dim=1)
                 frame_roll = torch.cat(frame_roll_chunks, dim=1)
                 # --- Code completion ends here ---
@@ -96,6 +96,7 @@ class Trans2MusicVAE(nn.Module):
 
                 frame_roll = output_dict["frame_roll"]
 
+        frame_roll = rearrange(frame_roll, 'b (t p) c-> b t (p c)', p=4)
 
         # Condition
         cond_dict = {
